@@ -1,0 +1,74 @@
+name: Build HyperOS APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.local/ci-target
+      HORIZON_TELEMETRY_URL: "off"
+      ABI: arm64-v8a
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create debug keystore
+        run: |
+          mkdir -p .local/android
+          keytool -genkeypair -v \
+            -keystore .local/android/debug.keystore \
+            -storepass android -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=HyperOS,O=Dev,C=BR"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14"
+
+      - name: Install Android + Rust target
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$sdkmanager" ]]; then
+            sdkmanager=$(find "$ANDROID_HOME/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort -V | tail -n 1)
+          fi
+          yes | "$sdkmanager" --sdk_root="$ANDROID_HOME" \
+            "platforms;android-35" "build-tools;35.0.0" "ndk;28.2.13676358" || true
+          rustup target add aarch64-linux-android
+
+      - name: Prepare engine
+        run: python3 tools/android_prepare.py --java-home "$JAVA_HOME"
+
+      - name: Build APK
+        run: |
+          JAVA17="${JAVA_HOME_17_X64:-$JAVA_HOME}"
+          python3 tools/android_build.py --abi arm64-v8a --public --profile release \
+            --sdk "$ANDROID_HOME" --java-home "\( JAVA17" --gradle " \)(command -v gradle)" \
+            --ndk-version 28.2.13676358 --build-tools-version 35.0.0 \
+            --dev-build "\( {GITHUB_RUN_NUMBER}. \){GITHUB_SHA:0:12}" \
+            --dev-version-code "$((1000 + GITHUB_RUN_NUMBER))"
+
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          find .local -name '*.apk' -print
+          found=$(find .local/android/apk -name '*.apk' | head -n 1)
+          test -n "$found"
+          cp "$found" dist/HyperOS-arm64-v8a.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HyperOS-arm64-v8a
+          path: dist/HyperOS-arm64-v8a.apk
+          if-no-files-found: error
